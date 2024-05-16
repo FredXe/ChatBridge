@@ -4,12 +4,12 @@ from queue import Queue, Empty
 from typing import NamedTuple, Any, List
 
 import discord
-from discord import Message
+from discord import Message, Webhook, SyncWebhook
 from discord.ext import commands
 from discord.ext.commands import Context
 
 from chatbridge.common import logger
-from chatbridge.core.network.protocol import ChatPayload
+from chatbridge.core.network.protocol import ChatPayload, PacketType, DiscordChatPayload, CustomPayload
 from chatbridge.impl.discord import stored
 from chatbridge.impl.discord.config import DiscordConfig
 from chatbridge.impl.discord.helps import CommandHelpMessageAll, CommandHelpMessage, StatsCommandHelpMessage
@@ -29,6 +29,8 @@ class MessageData(NamedTuple):
 
 
 class DiscordBot(commands.Bot):
+	sync_webhook: SyncWebhook
+
 	def __init__(self, command_prefix, **options):
 		options['help_command'] = None
 		super().__init__(command_prefix, **options)
@@ -45,6 +47,21 @@ class DiscordBot(commands.Bot):
 	def config(self) -> DiscordConfig:
 		return stored.config
 
+	@property
+	async def webhook(self) -> Webhook:
+		channel_chat = self.get_channel(self.config.channel_for_chat)
+		try:
+			webhooks = await channel_chat.webhooks()
+			for _webhook in webhooks:
+				if _webhook.user == self.user:
+					return _webhook
+			raise Exception('no valid webhook')
+		except:
+			return await channel_chat.create_webhook(name='Chatbridge webhook')
+
+	# @property
+	# async def 
+
 	def start_running(self):
 		self.logger.info('Starting the bot')
 		self.run(self.config.bot_token)
@@ -53,6 +70,7 @@ class DiscordBot(commands.Bot):
 		self.logger.info('Message listening looping...')
 		try:
 			channel_chat = self.get_channel(self.config.channel_for_chat)
+			webhook = await self.webhook
 			while True:
 				try:
 					message_data = self.messages.get(block=False)  # type: MessageData
@@ -60,6 +78,7 @@ class DiscordBot(commands.Bot):
 					await asyncio.sleep(0.05)
 					continue
 				data = message_data.data
+				discord.Embed()
 				if message_data.type == MessageDataType.CHAT:  # chat message
 					assert isinstance(data, tuple)
 					sender: str = data[0]
@@ -72,7 +91,11 @@ class DiscordBot(commands.Bot):
 					# 			message += '   | [{} -> {}] {}'.format(translation.src, dest, translation.text)
 					# 	except:
 					# 		self.logger.error('Translate fail')
-					await channel_chat.send(self.format_message_text('[{}] {}'.format(sender, payload.formatted_str())))
+					if payload.author:
+						await webhook.send(payload.message, avatar_url='https://mc-heads.net/avatar/{}'.format(payload.author), username='[{}] {}'.format(sender, payload.author))
+					else:
+						await channel_chat.send(self.format_message_text('[{}] {}'.format(sender, payload.formatted_str())))
+
 				elif message_data.type == MessageDataType.EMBED:  # embed
 					assert isinstance(data, discord.Embed)
 					self.logger.debug('Sending embed')
@@ -87,6 +110,8 @@ class DiscordBot(commands.Bot):
 
 	async def on_ready(self):
 		self.logger.info(f'Logged in as {self.user}')
+		webhook = await self.webhook
+		self.sync_webhook = SyncWebhook.from_url(webhook.url)
 		await self.listeningMessage()
 
 	async def on_message(self, message: Message):
@@ -103,8 +128,73 @@ class DiscordBot(commands.Bot):
 					return
 			# Chat
 			if message.channel.id == self.config.channel_for_chat:
+				webhook = await self.webhook
+				# ignore itselves webhook message
+				if message.webhook_id == webhook.id:
+					return
 				self.logger.info('Chat: {}'.format(msg_debug))
-				stored.client.broadcast_chat(message.content, author=message.author.name)
+				# send direct if the message is player info
+				if message.author.id == self.config.server_info_bot_id:
+					stored.client.send_to_all(type_=PacketType.custom, payload=CustomPayload(
+						data = {
+							'type': 'serverinfo',
+							'message': message.clean_content.removeprefix('**').removesuffix('**')
+						}
+					))
+					return
+				# fetch message info
+				color = ''
+				author_name = ''
+				if message.author.bot:
+					color = '#ffffff'
+					author_name = message.author.name
+				else:
+					color = '#' + hex(message.author.color.value).removeprefix('0x')
+					# fetch author nickname/name
+					author_name = message.author.nick if message.author.nick else message.author.global_name
+
+				# fetch reply message info
+				reply_name = ''
+				reply_color = ''
+				reply_mes = ''
+				if message.reference:
+					reference: Message = message.reference.resolved
+					# fetch reply message info depends on webhook message or not
+					if reference.webhook_id:
+						# author is a webhook
+						author = reference.author
+						reply_name = author.display_name
+						try:
+							reply_name = reply_name.split('] ', 1)[1]
+						except:
+							reply_name
+						reply_color = '#ffffff'
+						if reference.embeds:
+							embed = reference.embeds[0]
+							reply_mes = embed.description
+					elif reference.author.bot:
+						author = reference.author
+						reply_name = author.name
+						reply_color = '#ffffff'
+					else:
+						# author is a member
+						channel_chat = self.get_channel(self.config.channel_for_chat)
+						author = await channel_chat.guild.fetch_member(reference.author.id)
+						reply_name = author.nick if author.nick else author.global_name
+						reply_color = '#' + hex(author.color.value).removeprefix('0x')
+
+					if not reply_mes:
+						reply_mes = reference.content
+
+				stored.client.braodcast_discord_chat(
+					message.author.top_role.name,
+					color,
+					author_name,
+					message.clean_content,
+					reply_name,
+					reply_color,
+					reply_mes
+				)
 
 	def add_message(self, data, channel_id, t):
 		self.messages.put(MessageData(data=data, channel=channel_id, type=t))

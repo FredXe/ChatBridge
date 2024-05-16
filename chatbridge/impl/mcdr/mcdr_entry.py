@@ -1,10 +1,14 @@
 import os
+import re
 import shutil
 from threading import Event, Lock
 from typing import Optional
+from time import sleep
 
 from mcdreforged.api.all import *
 
+from chatbridge.common import constants
+from chatbridge.core.network.protocol import CustomPayload, PacketType
 from chatbridge.impl import utils
 from chatbridge.impl.mcdr.client import ChatBridgeMCDRClient
 from chatbridge.impl.mcdr.config import MCDRClientConfig
@@ -16,6 +20,7 @@ config: Optional[MCDRClientConfig] = None
 plugin_unload_flag = False
 cb_stop_done = Event()
 cb_lock = Lock()
+mc_rcon: RconConnection
 
 
 def tr(key: str, *args, **kwargs) -> RTextBase:
@@ -72,6 +77,26 @@ def send_chat(message: str, *, author: str = ''):
 				client.broadcast_chat(message, author)
 
 
+@new_thread('ChatBridge-messenger-custom')
+def send_player_join_leave(data: dict):
+	with cb_lock:
+		if client is not None:
+			if not client.is_running():
+				client.start()
+			if client.is_online():
+				client.send_to(PacketType.custom, constants.SERVER_NAME, CustomPayload(data=data))
+
+
+@new_thread('ChatBridge-broadcast-custom')
+def broadcast_custom_payload(data: dict):
+	with cb_lock:
+		if client is not None:
+			if not client.is_running():
+				client.start()
+			if client.is_online():
+				client.send_to_all(PacketType.custom, CustomPayload(data=data))
+
+
 def on_load(server: PluginServerInterface, old_module):
 	cb1_config_path = os.path.join('config', 'ChatBridge_client.json')
 	config_path = os.path.join(server.get_data_folder(), 'config.json')
@@ -111,6 +136,8 @@ def on_load(server: PluginServerInterface, old_module):
 	)
 	server.register_command(Literal('!!online').runs(query_online))
 
+	init_rcon(server)
+
 	@new_thread('ChatBridge-start')
 	def start():
 		with cb_lock:
@@ -126,24 +153,72 @@ def on_load(server: PluginServerInterface, old_module):
 
 
 def on_user_info(server: PluginServerInterface, info: Info):
+	if not config.send_to_chat_bridge.chat: return
 	if info.is_from_server:
 		send_chat(info.content, author=info.player)
 
 
+@new_thread
+def broadcast_first_join(server: PluginServerInterface, player_name: str):
+	server.say(RText(f'有一隻新湯匙🥄 {player_name} 掉在新手村', RColor.gold))
+	broadcast_custom_payload({
+		'type': 'player-first-join',
+		'player': player_name
+	})
+
+
 def on_player_joined(server: PluginServerInterface, player_name: str, info: Info):
-	send_chat('{} joined {}'.format(player_name, config.name))
+	if not config.send_to_chat_bridge.player_joined: return
+	if config.send_to_chat_bridge.player_first_join:
+		global mc_rcon
+		ret = mc_rcon.send_command(f'tag {player_name} list')
+		server.logger.info(ret)
+		if not re.search(f'{player_name} has \d+ tags:.+joined', ret):
+			mc_rcon.send_command(f'tag {player_name} add joined')
+			broadcast_first_join(server, player_name)
+
+
+	send_player_join_leave({
+		'type': 'player-join-leave',
+		'player': player_name,
+		'join': True
+	})
 
 
 def on_player_left(server: PluginServerInterface, player_name: str):
-	send_chat('{} left {}'.format(player_name, config.name))
+	if not config.send_to_chat_bridge.player_left: return
+	send_player_join_leave({
+		'type': 'player-join-leave',
+		'player': player_name,
+		'join': False
+	})
+
+
+@new_thread
+def init_rcon(server: PluginServerInterface):
+	if not config.send_to_chat_bridge.player_first_join: return
+	global mc_rcon
+	mc_rcon = RconConnection(config.mc_rcon.host, config.mc_rcon.port, config.mc_rcon.password)
+	while not mc_rcon.connect():
+		sleep(0.1)
+	server.logger.info('Rcon connected')
 
 
 def on_server_startup(server: PluginServerInterface):
-	send_chat('Server has started up')
+	init_rcon(server)
+	if not config.send_to_chat_bridge.server_start: return
+	broadcast_custom_payload({
+		'type': 'server-start-stop',
+		'start': True
+	})
 
 
 def on_server_stop(server: PluginServerInterface, return_code: int):
-	send_chat('Server stopped')
+	if not config.send_to_chat_bridge.server_stop: return
+	broadcast_custom_payload({
+		'type': 'server-start-stop',
+		'start': False
+	})
 
 
 @event_listener('more_apis.death_message')

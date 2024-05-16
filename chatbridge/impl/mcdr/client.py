@@ -3,7 +3,7 @@ from typing import Optional
 from mcdreforged.api.all import *
 
 from chatbridge.core.client import ChatBridgeClient
-from chatbridge.core.network.protocol import ChatPayload, CommandPayload
+from chatbridge.core.network.protocol import ChatPayload, CommandPayload, DiscordChatPayload, CustomPayload
 from chatbridge.impl.mcdr.config import MCDRClientConfig
 from chatbridge.impl.tis.protocol import StatsQueryResult, OnlineQueryResult
 
@@ -35,7 +35,12 @@ class ChatBridgeMCDRClient(ChatBridgeClient):
 		self.logger.info('Client stopped')
 
 	def on_chat(self, sender: str, payload: ChatPayload):
+		if not self.config.send_to_minecraft.chat: return
 		self.server.say(RText('[{}] {}'.format(sender, payload.formatted_str()), RColor.gray))
+
+	def on_discord_chat(self, sender: str, payload: DiscordChatPayload):
+		if not self.config.send_to_minecraft.discord_chat: return
+		self.server.say(payload.rtext_list)
 
 	def on_command(self, sender: str, payload: CommandPayload):
 		is_ask = not payload.responded
@@ -84,3 +89,36 @@ class ChatBridgeMCDRClient(ChatBridgeClient):
 
 	def query_online(self, client_to_query_online: str, player: str):
 		self.send_command(client_to_query_online, '!!online', params={'player': player})
+
+	@new_thread
+	def on_custom(self, sender: str, payload: CustomPayload):
+		self.server.logger.info(payload)
+		conf = self.config.send_to_minecraft
+		if payload.data['type'] == 'serverinfo':
+			if not conf.server_info: return
+			self.server.say(RText('[{}] {}'.format('Spoon', payload.data['message']), RColor.gray))
+		elif payload.data['type'] == 'player-join-leave':
+			if not conf.player_join_leave: return
+			server = payload.data['server']
+			if server == self.get_name(): return
+			is_join = payload.data['join']
+			player = payload.data['player']
+			msg = '加入了遊戲' if is_join else '離開了遊戲'
+			self.server.say(RText(f'[{server}] {player} {msg}', RColor.gray))
+		elif payload.data['type'] == 'player-swap-server':
+			if not conf.player_swap_server: return
+			_from = payload.data['from']
+			_to = payload.data['to']
+			player = payload.data['player']
+			self.server.say(RText(f'[{_from}] {player} 移動到 {_to}', RColor.gray))
+		elif payload.data['type'] == 'server-start-stop':
+			if not conf.server_start_stop: return
+			server = sender
+			msg = '已啟動' if payload.data['start'] else '已關閉'
+			self.server.say(RText(f'[{server}] 伺服器{msg}', RColor.gray))
+		elif payload.data['type'] == 'player-first-join':
+			self.server.logger.info('fsas')
+			if not conf.player_first_join: return
+			player = payload.data['player']
+			self.server.say(RText(f'有一隻新湯匙🥄 {player} 掉在新手村', RColor.gold))
+

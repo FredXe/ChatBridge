@@ -1,8 +1,12 @@
+from mcdreforged.api.decorator import new_thread
+
 from chatbridge.core.client import ChatBridgeClient
-from chatbridge.core.network.protocol import ChatPayload, CommandPayload
+from chatbridge.core.network.protocol import ChatPayload, CommandPayload, CustomPayload
 from chatbridge.impl.discord import stored
 from chatbridge.impl.discord.bot import MessageDataType
 from chatbridge.impl.tis.protocol import StatsQueryResult, OnlineQueryResult
+
+from discord import Embed, Color, Client
 
 
 class DiscordChatClient(ChatBridgeClient):
@@ -31,3 +35,54 @@ class DiscordChatClient(ChatBridgeClient):
 		elif payload.command == '!!online':
 			result = OnlineQueryResult.deserialize(payload.result)
 			bot.add_embed('{} online players'.format(stored.config.server_display_name), 'Player list', '\n'.join(result.data), channel_id)
+
+	@new_thread('ChatBridge-discord-on-custom')
+	def on_custom(self, sender: str, payload: CustomPayload):
+		if payload.data['type'] == 'player-join-leave':
+			player = payload.data['player']
+			server = payload.data['server']
+			color: Color
+			msg: str
+
+			if payload.data['join']:
+				color = Color.green()
+				msg = '加入了遊戲'
+			else:
+				color = Color.red()
+				msg = '離開了遊戲'
+
+			embed = Embed(description=f'**{server} ▶ {player} {msg}**', color=color)
+
+			stored.bot.sync_webhook.send(embed=embed, username=stored.bot.user.name, avatar_url=stored.bot.user.avatar.url)
+		elif payload.data['type'] == 'player-swap-server':
+			player = payload.data['player']
+			_from = payload.data['from']
+			_to = payload.data['to']
+
+			embed = Embed(description=f'**{_from} ▶ {player} 移動到 {_to}**', color=Color.blue())
+
+			stored.bot.sync_webhook.send(embed=embed, username=stored.bot.user.name, avatar_url=stored.bot.user.avatar.url)
+		elif payload.data['type'] == 'server-start-stop':
+			server = sender
+			color: Color
+			emoji: str
+			msg: str
+
+			if payload.data['start']:
+				color = Color.green()
+				emoji = '🟢'
+				msg = '已啟動'
+			else:
+				color = Color.red()
+				emoji = '🔴'
+				msg = '已關閉'
+
+			embed = Embed(description=f'**{emoji} {server} 伺服器{msg}**', color=color)
+
+			stored.bot.sync_webhook.send(embed=embed, username=stored.bot.user.name, avatar_url=stored.bot.user.avatar.url)
+		elif payload.data['type'] == 'player-first-join':
+			player = payload.data['player']
+
+			embed = Embed(description=f'**有一隻新湯匙🥄 {player} 掉在新手村**', color=Color.gold())
+
+			stored.bot.sync_webhook.send(embed=embed, username=stored.bot.user.name, avatar_url=stored.bot.user.avatar.url)
